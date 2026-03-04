@@ -1,13 +1,13 @@
 import Foundation
 import Darwin
 
-nonisolated struct HopResult: Sendable {
+struct HopResult: Sendable {
     let hop: Int
     let address: String
     let latencyMs: Double
 }
 
-nonisolated final class ICMPEngine: @unchecked Sendable {
+final class ICMPEngine: @unchecked Sendable {
     private let identifier: UInt16
     private let sock: Int32
     private var nextSequence: UInt16 = 33434
