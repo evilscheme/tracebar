@@ -15,9 +15,9 @@ final class TracerouteViewModel: ObservableObject {
     // MARK: - Settings
 
     @AppStorage("targetHost") var targetHost = "8.8.8.8"
-    @AppStorage("idleProbeInterval") var idleInterval: Double = 5.0
-    @AppStorage("activeProbeInterval") var activeInterval: Double = 1.0
-    @AppStorage("historyMinutes") var historyMinutes: Double = 5.0
+    @AppStorage("idleProbeInterval") var idleInterval: Double = 10.0
+    @AppStorage("activeProbeInterval") var activeInterval: Double = 2.0
+    @AppStorage("historyMinutes") var historyMinutes: Double = 3.0
     @AppStorage("resolveHostnames") var resolveHostnames = true
     @AppStorage("maxHops") var maxHops = 30
     @AppStorage("heatmapColorScheme") var colorSchemeName: String = HeatmapColorScheme.oceanic.rawValue
