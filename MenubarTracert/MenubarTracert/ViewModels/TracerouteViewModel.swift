@@ -10,7 +10,6 @@ final class TracerouteViewModel: ObservableObject {
     @Published var latencyHistory: [Double] = []
     @Published var isProbing = false
     @Published var isPanelOpen = false
-    @Published var helperInstalled = false
     @Published var errorMessage: String?
 
     // MARK: - Settings
@@ -29,7 +28,7 @@ final class TracerouteViewModel: ObservableObject {
 
     // MARK: - Private
 
-    private let xpcClient = HelperXPCClient()
+    private let engine = ICMPEngine()
     private var probeTimer: Timer?
     private var rescheduleDebounce: DispatchWorkItem?
     private let sparklineCapacity = 60
@@ -38,24 +37,7 @@ final class TracerouteViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
-        // Debug: print the app bundle path and check for the plist
-        let bundle = Bundle.main
-        print("[Start] Bundle path: \(bundle.bundlePath)")
-        let plistPath = bundle.bundlePath + "/Contents/Library/LaunchDaemons/org.evilscheme.MenubarTracert.TracertHelper.plist"
-        let helperPath = bundle.bundlePath + "/Contents/MacOS/TracertHelper"
-        print("[Start] Plist exists: \(FileManager.default.fileExists(atPath: plistPath))")
-        print("[Start] Helper exists: \(FileManager.default.fileExists(atPath: helperPath))")
-
-        do {
-            try HelperManager.shared.registerIfNeeded()
-            helperInstalled = true
-        } catch {
-            helperInstalled = false
-            errorMessage = "Helper installation failed: \(error.localizedDescription)"
-            print("[Start] Registration error: \(error)")
-            return
-        }
-        scheduleProbing()
+        rescheduleProbing()
     }
 
     func panelDidOpen() {
@@ -87,10 +69,6 @@ final class TracerouteViewModel: ObservableObject {
 
     // MARK: - Probing
 
-    private func scheduleProbing() {
-        rescheduleProbing()
-    }
-
     func rescheduleProbing() {
         // Debounce rapid calls (e.g. slider dragging) — only the last
         // invocation within the window actually restarts probing.
@@ -116,66 +94,61 @@ final class TracerouteViewModel: ObservableObject {
     }
 
     private func runProbeRound() async {
-        guard let proxy = xpcClient.connect() else {
-            errorMessage = "Cannot connect to helper"
-            return
-        }
-
         isProbing = true
         errorMessage = nil
 
         let bufferCapacity = Int(historyMinutes * 60 / activeInterval)
+        let target = targetHost
+        let hops = maxHops
 
-        proxy.probeRound(host: targetHost, maxHops: maxHops) { [weak self] results in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+        let results = await Task.detached {
+            self.engine.probeRound(host: target, maxHops: hops)
+        }.value
 
-                for result in results {
-                    let probe = ProbeResult(
-                        hop: result.hop,
-                        address: result.address,
-                        hostname: self.resolveHostnames ? self.cachedHostname(for: result.address) : nil,
-                        latencyMs: result.latencyMs,
-                        timestamp: Date(timeIntervalSinceReferenceDate: result.timestamp)
-                    )
+        for result in results {
+            let probe = ProbeResult(
+                hop: result.hop,
+                address: result.address,
+                hostname: resolveHostnames ? cachedHostname(for: result.address) : nil,
+                latencyMs: result.latencyMs,
+                timestamp: Date()
+            )
 
-                    if let idx = self.hops.firstIndex(where: { $0.hop == result.hop }) {
-                        self.hops[idx].probes.append(probe)
-                        if !result.address.isEmpty {
-                            self.hops[idx].address = result.address
-                            self.hops[idx].hostname = probe.hostname
-                        }
-                    } else {
-                        var hopData = HopData(
-                            id: result.hop,
-                            hop: result.hop,
-                            address: result.address,
-                            hostname: probe.hostname,
-                            probes: RingBuffer<ProbeResult>(capacity: bufferCapacity)
-                        )
-                        hopData.probes.append(probe)
-                        self.hops.append(hopData)
-                        self.hops.sort { $0.hop < $1.hop }
-                    }
+            if let idx = self.hops.firstIndex(where: { $0.hop == result.hop }) {
+                self.hops[idx].probes.append(probe)
+                if !result.address.isEmpty {
+                    self.hops[idx].address = result.address
+                    self.hops[idx].hostname = probe.hostname
                 }
-
-                // Remove hops whose data has fully aged out of the history window.
-                let cutoff = Date().addingTimeInterval(-self.historyMinutes * 60)
-                self.hops.removeAll { hop in
-                    guard let newest = hop.probes.elements.last else { return true }
-                    return newest.timestamp < cutoff
-                }
-
-                if let lastResponding = self.hops.last(where: { $0.lastLatencyMs > 0 }) {
-                    self.latencyHistory.append(lastResponding.lastLatencyMs)
-                    if self.latencyHistory.count > self.sparklineCapacity {
-                        self.latencyHistory.removeFirst()
-                    }
-                }
-
-                self.isProbing = false
+            } else {
+                var hopData = HopData(
+                    id: result.hop,
+                    hop: result.hop,
+                    address: result.address,
+                    hostname: probe.hostname,
+                    probes: RingBuffer<ProbeResult>(capacity: bufferCapacity)
+                )
+                hopData.probes.append(probe)
+                self.hops.append(hopData)
+                self.hops.sort { $0.hop < $1.hop }
             }
         }
+
+        // Remove hops whose data has fully aged out of the history window.
+        let cutoff = Date().addingTimeInterval(-historyMinutes * 60)
+        self.hops.removeAll { hop in
+            guard let newest = hop.probes.elements.last else { return true }
+            return newest.timestamp < cutoff
+        }
+
+        if let lastResponding = self.hops.last(where: { $0.lastLatencyMs > 0 }) {
+            latencyHistory.append(lastResponding.lastLatencyMs)
+            if latencyHistory.count > sparklineCapacity {
+                latencyHistory.removeFirst()
+            }
+        }
+
+        isProbing = false
     }
 
     private func cachedHostname(for ip: String) -> String? {

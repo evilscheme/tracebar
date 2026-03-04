@@ -72,9 +72,9 @@ private struct GeneralTab: View {
                         }
                     }
 
-                LabeledContent("Helper Status") {
-                    Text(viewModel.helperInstalled ? "Installed" : "Not Installed")
-                        .foregroundStyle(viewModel.helperInstalled ? .green : .red)
+                LabeledContent("Engine") {
+                    Text("In-Process")
+                        .foregroundStyle(.green)
                 }
             }
         }
