@@ -72,9 +72,9 @@ private struct GeneralTab: View {
                         }
                     }
 
-                LabeledContent("Engine") {
-                    Text("In-Process")
-                        .foregroundStyle(.green)
+                LabeledContent("Version") {
+                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown")
+                        .foregroundStyle(.secondary)
                 }
             }
         }
