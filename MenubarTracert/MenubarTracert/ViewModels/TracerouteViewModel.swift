@@ -29,6 +29,7 @@ final class TracerouteViewModel: ObservableObject {
     // MARK: - Private
 
     private let engine = ICMPEngine()
+    private let probeQueue = DispatchQueue(label: "org.evilscheme.MenubarTracert.probe")
     private var probeTimer: Timer?
     private var rescheduleDebounce: DispatchWorkItem?
     private let sparklineCapacity = 60
@@ -60,7 +61,9 @@ final class TracerouteViewModel: ObservableObject {
         hostnameCache.removeAll()
         for i in hops.indices {
             if resolveHostnames {
-                hops[i].hostname = cachedHostname(for: hops[i].address)
+                let name = Self.resolveHostname(hops[i].address)
+                if let name { hostnameCache[hops[i].address] = name }
+                hops[i].hostname = name
             } else {
                 hops[i].hostname = nil
             }
@@ -100,16 +103,26 @@ final class TracerouteViewModel: ObservableObject {
         let bufferCapacity = Int(historyMinutes * 60 / activeInterval)
         let target = targetHost
         let hops = maxHops
+        let eng = engine
+        let resolve = resolveHostnames
+        let queue = probeQueue
 
-        let results = await Task.detached {
-            self.engine.probeRound(host: target, maxHops: hops)
-        }.value
+        let results = await withCheckedContinuation { continuation in
+            queue.async {
+                let probeResults = eng.probeRound(host: target, maxHops: hops)
+                let mapped = probeResults.map { r in
+                    (r, resolve ? TracerouteViewModel.resolveHostname(r.address) : nil)
+                }
+                continuation.resume(returning: mapped)
+            }
+        }
 
-        for result in results {
+        for (result, hostname) in results {
+            if let hostname { hostnameCache[result.address] = hostname }
             let probe = ProbeResult(
                 hop: result.hop,
                 address: result.address,
-                hostname: resolveHostnames ? cachedHostname(for: result.address) : nil,
+                hostname: hostname,
                 latencyMs: result.latencyMs,
                 timestamp: Date()
             )
@@ -134,6 +147,11 @@ final class TracerouteViewModel: ObservableObject {
             }
         }
 
+        // Remove hops beyond the destination (engine returns up to destHop).
+        if let maxHop = results.last?.0.hop {
+            self.hops.removeAll { $0.hop > maxHop }
+        }
+
         // Remove hops whose data has fully aged out of the history window.
         let cutoff = Date().addingTimeInterval(-historyMinutes * 60)
         self.hops.removeAll { hop in
@@ -154,12 +172,12 @@ final class TracerouteViewModel: ObservableObject {
     private func cachedHostname(for ip: String) -> String? {
         guard !ip.isEmpty else { return nil }
         if let cached = hostnameCache[ip] { return cached }
-        let name = resolveHostname(ip)
+        let name = Self.resolveHostname(ip)
         if let name { hostnameCache[ip] = name }
         return name
     }
 
-    private nonisolated func resolveHostname(_ ip: String) -> String? {
+    fileprivate static nonisolated func resolveHostname(_ ip: String) -> String? {
         guard !ip.isEmpty else { return nil }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)

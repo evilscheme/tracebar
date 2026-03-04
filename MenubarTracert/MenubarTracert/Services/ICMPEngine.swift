@@ -1,13 +1,13 @@
 import Foundation
 import Darwin
 
-struct HopResult {
+nonisolated struct HopResult: Sendable {
     let hop: Int
     let address: String
     let latencyMs: Double
 }
 
-final class ICMPEngine {
+nonisolated final class ICMPEngine: @unchecked Sendable {
     private let identifier: UInt16
     private let sock: Int32
     private var nextSequence: UInt16 = 33434
@@ -43,7 +43,6 @@ final class ICMPEngine {
         guard var destAddr = resolveHost(host) else {
             return []
         }
-        let destIP = ipString(from: destAddr)
 
         // seq -> (hop, sendTime) mapping for response matching
         var probeMap: [UInt16: (hop: Int, sendTime: UInt64)] = [:]
@@ -74,7 +73,7 @@ final class ICMPEngine {
             var tv = timeval(tv_sec: 0, tv_usec: Int32(inlineTimeout * 1_000_000))
             setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             collectResponses(probeMap: probeMap, responses: &responses,
-                             destIP: destIP, destHop: &destHop, maxReads: 3)
+                             destHop: &destHop, maxReads: 3)
 
             if destHop < maxHops && hop >= destHop { break }
         }
@@ -82,16 +81,22 @@ final class ICMPEngine {
         // Phase 2: Bulk collection for slow/rate-limited responses
         let bulkTimeout = max(timeout - Double(min(destHop, maxHops)) * inlineTimeout, 0.5)
         let deadline = Date().addingTimeInterval(bulkTimeout)
+        var consecutiveMisses = 0
 
         while Date() < deadline {
-            let remaining = max(deadline.timeIntervalSinceNow, 0.01)
-            var tv = timeval(tv_sec: Int(remaining), tv_usec: Int32((remaining.truncatingRemainder(dividingBy: 1)) * 1_000_000))
+            let remaining = min(max(deadline.timeIntervalSinceNow, 0.01), 0.15)
+            var tv = timeval(tv_sec: 0, tv_usec: Int32(remaining * 1_000_000))
             setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
             let before = responses.count
             collectResponses(probeMap: probeMap, responses: &responses,
-                             destIP: destIP, destHop: &destHop, maxReads: 1)
-            if responses.count == before { break }
+                             destHop: &destHop, maxReads: 1)
+            if responses.count == before {
+                consecutiveMisses += 1
+                if consecutiveMisses >= 3 { break }
+            } else {
+                consecutiveMisses = 0
+            }
             if responses.count >= destHop { break }
         }
 
@@ -110,7 +115,6 @@ final class ICMPEngine {
     private func collectResponses(
         probeMap: [UInt16: (hop: Int, sendTime: UInt64)],
         responses: inout [Int: (address: String, latencyMs: Double)],
-        destIP: String,
         destHop: inout Int,
         maxReads: Int
     ) {
@@ -139,7 +143,9 @@ final class ICMPEngine {
                 let seq = UInt16(data[6]) << 8 | UInt16(data[7])
                 guard let probe = probeMap[seq] else { continue }
                 responses[probe.hop] = (senderIP, machDiffMs(probe.sendTime, recvTime))
-                if senderIP == destIP { destHop = min(destHop, probe.hop) }
+                // Any Echo Reply means we reached the destination — only the
+                // final target generates Echo Replies (routers send Time Exceeded).
+                destHop = min(destHop, probe.hop)
             } else if icmpType == 11 || icmpType == 3 { // Time Exceeded / Dest Unreachable
                 // Inner IP packet starts at offset 8 (skip ICMP header)
                 let innerIPOffset = 8

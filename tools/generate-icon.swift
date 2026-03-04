@@ -2,23 +2,33 @@
 import AppKit
 import CoreGraphics
 
-func generateIcon(size: Int) -> NSImage {
-    let img = NSImage(size: NSSize(width: size, height: size))
-    img.lockFocus()
+func generateIcon(pixelSize: Int) -> Data? {
+    let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: pixelSize,
+        pixelsHigh: pixelSize,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    )!
 
-    guard let ctx = NSGraphicsContext.current?.cgContext else {
-        img.unlockFocus()
-        return img
-    }
-    let s = CGFloat(size)
+    let ctx = NSGraphicsContext(bitmapImageRep: rep)!
+    NSGraphicsContext.current = ctx
+    let cgCtx = ctx.cgContext
+
+    let s = CGFloat(pixelSize)
     let pad = s * 0.1
 
     // Background: rounded rect with gradient
     let bgRect = CGRect(x: 0, y: 0, width: s, height: s)
     let cornerRadius = s * 0.2
     let bgPath = CGPath(roundedRect: bgRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-    ctx.addPath(bgPath)
-    ctx.clip()
+    cgCtx.addPath(bgPath)
+    cgCtx.clip()
 
     // Gradient: dark teal to darker teal
     let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -27,7 +37,7 @@ func generateIcon(size: Int) -> NSImage {
         CGColor(red: 0.05, green: 0.2, blue: 0.3, alpha: 1.0)
     ] as CFArray
     if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
-        ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: s), end: CGPoint(x: s, y: 0), options: [])
+        cgCtx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: s), end: CGPoint(x: s, y: 0), options: [])
     }
 
     // Draw stylized route: dots connected by lines
@@ -37,16 +47,16 @@ func generateIcon(size: Int) -> NSImage {
     ]
 
     // Draw connecting lines
-    ctx.setStrokeColor(CGColor(red: 0.3, green: 0.8, blue: 0.9, alpha: 0.6))
-    ctx.setLineWidth(s * 0.02)
-    ctx.setLineCap(.round)
+    cgCtx.setStrokeColor(CGColor(red: 0.3, green: 0.8, blue: 0.9, alpha: 0.6))
+    cgCtx.setLineWidth(s * 0.02)
+    cgCtx.setLineCap(.round)
     for i in 0..<nodes.count - 1 {
         let (x1, y1) = nodes[i]
         let (x2, y2) = nodes[i + 1]
-        ctx.move(to: CGPoint(x: pad + x1 * (s - 2 * pad), y: pad + y1 * (s - 2 * pad)))
-        ctx.addLine(to: CGPoint(x: pad + x2 * (s - 2 * pad), y: pad + y2 * (s - 2 * pad)))
+        cgCtx.move(to: CGPoint(x: pad + x1 * (s - 2 * pad), y: pad + y1 * (s - 2 * pad)))
+        cgCtx.addLine(to: CGPoint(x: pad + x2 * (s - 2 * pad), y: pad + y2 * (s - 2 * pad)))
     }
-    ctx.strokePath()
+    cgCtx.strokePath()
 
     // Draw nodes
     for (i, (x, y)) in nodes.enumerated() {
@@ -55,16 +65,16 @@ func generateIcon(size: Int) -> NSImage {
         let r = nodeRadius * (i == nodes.count - 1 ? 1.5 : 1.0)
 
         // Glow
-        ctx.setFillColor(CGColor(red: 0.3, green: 0.8, blue: 0.9, alpha: 0.3))
-        ctx.fillEllipse(in: CGRect(x: cx - r * 2, y: cy - r * 2, width: r * 4, height: r * 4))
+        cgCtx.setFillColor(CGColor(red: 0.3, green: 0.8, blue: 0.9, alpha: 0.3))
+        cgCtx.fillEllipse(in: CGRect(x: cx - r * 2, y: cy - r * 2, width: r * 4, height: r * 4))
 
         // Node
-        ctx.setFillColor(CGColor(red: 0.4, green: 0.9, blue: 1.0, alpha: 1.0))
-        ctx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+        cgCtx.setFillColor(CGColor(red: 0.4, green: 0.9, blue: 1.0, alpha: 1.0))
+        cgCtx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
     }
 
-    img.unlockFocus()
-    return img
+    NSGraphicsContext.current = nil
+    return rep.representation(using: .png, properties: [:])
 }
 
 let sizes: [(Int, String)] = [
@@ -83,10 +93,7 @@ let sizes: [(Int, String)] = [
 let outputDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "."
 
 for (size, filename) in sizes {
-    let img = generateIcon(size: size)
-    guard let tiff = img.tiffRepresentation,
-          let rep = NSBitmapImageRep(data: tiff),
-          let png = rep.representation(using: .png, properties: [:]) else {
+    guard let png = generateIcon(pixelSize: size) else {
         print("Failed to generate \(filename)")
         continue
     }
