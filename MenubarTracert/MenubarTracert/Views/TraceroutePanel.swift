@@ -38,6 +38,7 @@ struct TraceroutePanel: View {
 
             Divider()
 
+            #if compiler(>=6.2)
             if #available(macOS 26, *) {
                 // macOS 26+: use safeAreaInset for scroll edge effects on column
                 // headers and footer; dividers are replaced by the edge effect.
@@ -55,6 +56,13 @@ struct TraceroutePanel: View {
                 Divider()
                 footer
             }
+            #else
+            columnHeaders
+            Divider()
+            hopList
+            Divider()
+            footer
+            #endif
         }
         .frame(width: 494)
     }
@@ -137,10 +145,14 @@ struct TraceroutePanel: View {
 private extension View {
     @ViewBuilder
     func preferringGlassStyle() -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26, *) {
             self.buttonStyle(.glass)
         } else {
             self.buttonStyle(.borderless)
         }
+        #else
+        self.buttonStyle(.borderless)
+        #endif
     }
 }
