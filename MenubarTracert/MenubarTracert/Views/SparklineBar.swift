@@ -15,7 +15,7 @@ struct SparklineBar: View {
                 let windowStart = now.addingTimeInterval(-totalSeconds)
 
                 let visible = probes.filter { $0.timestamp >= windowStart }
-                guard visible.count >= 2 else { return }
+                guard visible.count >= 1 else { return }
 
                 // Auto-scale Y axis: minimum range of 10ms
                 let maxLatency = visible.filter { !$0.isTimeout }.map(\.latencyMs).max() ?? 10
@@ -31,28 +31,34 @@ struct SparklineBar: View {
 
                     let y: CGFloat
                     if probe.isTimeout {
-                        y = size.height - padding // bottom edge for timeouts
+                        y = size.height - padding // position tracked but not drawn
                     } else {
                         y = padding + (1 - CGFloat(probe.latencyMs / yScale)) * (size.height - padding * 2)
                     }
                     points.append((x: x, y: y, latencyMs: probe.latencyMs, isTimeout: probe.isTimeout))
                 }
 
-                // Draw connected line segments, each colored by latency
+                // Single non-timeout probe: render a small dot
+                let nonTimeoutPoints = points.filter { !$0.isTimeout }
+                if nonTimeoutPoints.count == 1, let pt = nonTimeoutPoints.first {
+                    let dot = Path(ellipseIn: CGRect(x: pt.x - 2, y: pt.y - 2, width: 4, height: 4))
+                    context.fill(dot, with: .color(colorScheme.color(for: pt.latencyMs)))
+                    return
+                }
+
+                // Draw connected line segments, skipping gaps at timeouts
                 for i in 1..<points.count {
                     let prev = points[i - 1]
                     let curr = points[i]
+
+                    // Break the line at timeout probes
+                    if prev.isTimeout || curr.isTimeout { continue }
 
                     var segment = Path()
                     segment.move(to: CGPoint(x: prev.x, y: prev.y))
                     segment.addLine(to: CGPoint(x: curr.x, y: curr.y))
 
-                    let color: Color
-                    if curr.isTimeout {
-                        color = colorScheme.timeoutColor
-                    } else {
-                        color = colorScheme.color(for: curr.latencyMs)
-                    }
+                    let color = colorScheme.color(for: curr.latencyMs)
 
                     context.stroke(segment, with: .color(color), lineWidth: 1.5)
                 }
