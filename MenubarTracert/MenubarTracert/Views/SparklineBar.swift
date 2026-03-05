@@ -46,21 +46,41 @@ struct SparklineBar: View {
                     return
                 }
 
-                // Draw connected line segments, skipping gaps at timeouts
+                // Map Y position back to latency for position-based coloring
+                let drawHeight = size.height - padding * 2
+                func latencyForY(_ y: CGFloat) -> Double {
+                    return (1 - (y - padding) / drawHeight) * yScale
+                }
+
+                // Draw connected line segments, subdivided for gradient coloring
                 for i in 1..<points.count {
                     let prev = points[i - 1]
                     let curr = points[i]
 
-                    // Break the line at timeout probes
                     if prev.isTimeout || curr.isTimeout { continue }
 
-                    var segment = Path()
-                    segment.move(to: CGPoint(x: prev.x, y: prev.y))
-                    segment.addLine(to: CGPoint(x: curr.x, y: curr.y))
+                    // Subdivide segment so color follows Y position
+                    let dx = curr.x - prev.x
+                    let dy = curr.y - prev.y
+                    let segmentLength = sqrt(dx * dx + dy * dy)
+                    let steps = max(Int(segmentLength / 1.5), 1)
 
-                    let color = colorScheme.color(for: curr.latencyMs)
+                    for s in 0..<steps {
+                        let t0 = CGFloat(s) / CGFloat(steps)
+                        let t1 = CGFloat(s + 1) / CGFloat(steps)
+                        let x0 = prev.x + dx * t0
+                        let y0 = prev.y + dy * t0
+                        let x1 = prev.x + dx * t1
+                        let y1 = prev.y + dy * t1
 
-                    context.stroke(segment, with: .color(color), lineWidth: 1.5)
+                        var sub = Path()
+                        sub.move(to: CGPoint(x: x0, y: y0))
+                        sub.addLine(to: CGPoint(x: x1, y: y1))
+
+                        let midY = (y0 + y1) / 2
+                        let color = colorScheme.color(for: latencyForY(midY))
+                        context.stroke(sub, with: .color(color), lineWidth: 1.5)
+                    }
                 }
             }
         }
