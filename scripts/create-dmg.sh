@@ -44,8 +44,10 @@ xcodebuild archive \
     -scheme "${SCHEME}" \
     -configuration Release \
     -archivePath "${ARCHIVE_PATH}" \
+    -destination "generic/platform=macOS" \
     CODE_SIGN_STYLE=Manual \
-    | tail -1
+    CODE_SIGN_IDENTITY="Developer ID Application" \
+    DEVELOPMENT_TEAM=4PX677GC4R
 
 [ -d "${ARCHIVE_PATH}" ] || error "Archive failed — ${ARCHIVE_PATH} not found"
 info "Archive created at ${ARCHIVE_PATH}"
@@ -68,8 +70,7 @@ PLIST
 xcodebuild -exportArchive \
     -archivePath "${ARCHIVE_PATH}" \
     -exportOptionsPlist "${EXPORT_PLIST}" \
-    -exportPath "${EXPORT_DIR}" \
-    | tail -1
+    -exportPath "${EXPORT_DIR}"
 
 APP_PATH="${EXPORT_DIR}/MenubarTracert.app"
 [ -d "${APP_PATH}" ] || error "Export failed — ${APP_PATH} not found"
