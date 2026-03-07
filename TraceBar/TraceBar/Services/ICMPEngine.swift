@@ -48,6 +48,7 @@ final class ICMPEngine: @unchecked Sendable {
     /// Concurrent send/receive probe: a dedicated receiver thread captures
     /// recvTime immediately on packet arrival while the sender paces probes
     /// with a short inter-packet delay on the calling thread.
+    /// - Important: Must be called from a single serial queue (not concurrently).
     func probeRound(host: String, maxHops: Int, timeout: TimeInterval = 2.0) -> [HopResult] {
         guard sock >= 0 else { return [] }
 
@@ -133,7 +134,9 @@ final class ICMPEngine: @unchecked Sendable {
 
                 guard let seq = matchedSeq, let hop = seqToHop[seq] else { continue }
 
-                let senderIP = String(cString: inet_ntoa(sender.sin_addr))
+                var addrBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                inet_ntop(AF_INET, &sender.sin_addr, &addrBuf, socklen_t(INET_ADDRSTRLEN))
+                let senderIP = String(cString: addrBuf)
 
                 lock.lock()
                 if let sendTime = sendTimes[seq] {
@@ -246,13 +249,4 @@ final class ICMPEngine: @unchecked Sendable {
         return info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
     }
 
-    private func ipString(from addr: sockaddr_in) -> String {
-        let addr = addr
-        return String(cString: inet_ntoa(addr.sin_addr))
-    }
-
-    private func machDiffMs(_ start: UInt64, _ end: UInt64) -> Double {
-        let nanos = Double(end - start) * machNumer / machDenom
-        return nanos / 1_000_000.0
-    }
 }
