@@ -7,6 +7,12 @@ struct HopResult: Sendable {
     let latencyMs: Double
 }
 
+struct ParsedICMPResponse: Sendable {
+    let seq: UInt16
+    let icmpType: UInt8
+    let icmpCode: UInt8
+}
+
 final class ICMPEngine: @unchecked Sendable {
     private let identifier: UInt16
     private let sock: Int32
@@ -45,6 +51,15 @@ final class ICMPEngine: @unchecked Sendable {
         return seq
     }
 
+    private final class ProbeState: @unchecked Sendable {
+        let lock = NSLock()
+        var sendTimes: [UInt16: UInt64] = [:]
+        var responses: [Int: (address: String, latencyMs: Double)] = [:]
+        var destHop: Int
+        var sendingDone = false
+        init(maxHops: Int) { self.destHop = maxHops }
+    }
+
     /// Concurrent send/receive probe: a dedicated receiver thread captures
     /// recvTime immediately on packet arrival while the sender paces probes
     /// with a short inter-packet delay on the calling thread.
@@ -68,17 +83,15 @@ final class ICMPEngine: @unchecked Sendable {
         }
         let seqToHop = Dictionary(uniqueKeysWithValues: hopSeqs.map { ($0.seq, $0.hop) })
 
-        // Shared mutable state protected by lock
-        let lock = NSLock()
-        var sendTimes: [UInt16: UInt64] = [:]
-        var responses: [Int: (address: String, latencyMs: Double)] = [:]
-        var destHop = maxHops
-        var sendingDone = false
+        let state = ProbeState(maxHops: maxHops)
 
         // Capture immutable values for the receiver closure
         let sockFd = self.sock
+        let engineID = self.identifier
         let numer = self.machNumer
         let denom = self.machDenom
+        let destIPAddr = destAddr.sin_addr.s_addr
+        let totalHops = maxHops
         let deadline = Date().addingTimeInterval(timeout)
 
         // --- Receiver thread: always blocking on recvfrom so recvTime is accurate ---
@@ -105,48 +118,37 @@ final class ICMPEngine: @unchecked Sendable {
 
                 guard n > 0 else {
                     consecutiveMisses += 1
-                    lock.lock()
-                    let done = sendingDone
-                    lock.unlock()
+                    state.lock.lock()
+                    let done = state.sendingDone
+                    state.lock.unlock()
                     if done && consecutiveMisses >= 5 { break }
                     continue
                 }
                 consecutiveMisses = 0
 
                 // Parse ICMP response (IP_STRIPHDR: ICMP starts at byte 0)
-                guard n >= 8 else { continue }
-                let icmpType = buf[0]
-                var matchedSeq: UInt16?
-                var isDestReply = false
-
-                if icmpType == 0 { // Echo Reply
-                    matchedSeq = UInt16(buf[6]) << 8 | UInt16(buf[7])
-                    isDestReply = true
-                } else if icmpType == 11 || icmpType == 3 { // Time Exceeded / Dest Unreachable
-                    let innerIPOffset = 8
-                    guard n >= innerIPOffset + 20 else { continue }
-                    let ihl = Int(buf[innerIPOffset] & 0x0F) * 4
-                    let innerICMPOff = innerIPOffset + ihl
-                    guard n >= innerICMPOff + 8 else { continue }
-                    matchedSeq = UInt16(buf[innerICMPOff + 6]) << 8 | UInt16(buf[innerICMPOff + 7])
-                    if icmpType == 3 { isDestReply = true }
-                }
-
-                guard let seq = matchedSeq, let hop = seqToHop[seq] else { continue }
+                guard let parsed = ICMPEngine.parseResponse(buf, count: n, identifier: engineID) else { continue }
+                guard let hop = seqToHop[parsed.seq] else { continue }
 
                 var addrBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 inet_ntop(AF_INET, &sender.sin_addr, &addrBuf, socklen_t(INET_ADDRSTRLEN))
                 let senderIP = String(cString: addrBuf)
 
-                lock.lock()
-                if let sendTime = sendTimes[seq] {
+                // Echo Reply always indicates destination. Dest Unreachable only
+                // counts as destination when it comes from the target IP itself;
+                // an intermediate sending Unreachable does not truncate the trace.
+                let isDestReply = parsed.icmpType == 0 ||
+                    (parsed.icmpType == 3 && sender.sin_addr.s_addr == destIPAddr)
+
+                state.lock.lock()
+                if let sendTime = state.sendTimes[parsed.seq] {
                     let latencyMs = Double(recvTime - sendTime) * numer / denom / 1_000_000.0
-                    responses[hop] = (senderIP, latencyMs)
-                    if isDestReply { destHop = min(destHop, hop) }
+                    state.responses[hop] = (senderIP, latencyMs)
+                    if isDestReply { state.destHop = min(state.destHop, hop) }
                 }
-                let complete = destHop < maxHops
-                    && (1...destHop).allSatisfy({ responses[$0] != nil })
-                lock.unlock()
+                let complete = (1...totalHops).allSatisfy({ state.responses[$0] != nil })
+                    || (state.destHop < totalHops && (1...state.destHop).allSatisfy({ state.responses[$0] != nil }))
+                state.lock.unlock()
 
                 if complete { break }
             }
@@ -155,9 +157,9 @@ final class ICMPEngine: @unchecked Sendable {
         // --- Sender: current thread, paced 10ms apart ---
         for (hop, seq) in hopSeqs {
             // Stop sending past the destination once the receiver identifies it
-            lock.lock()
-            let currentDest = destHop
-            lock.unlock()
+            state.lock.lock()
+            let currentDest = state.destHop
+            state.lock.unlock()
             if currentDest < maxHops && hop > currentDest { break }
 
             var ttl = Int32(hop)
@@ -166,9 +168,9 @@ final class ICMPEngine: @unchecked Sendable {
             let packet = buildPacket(sequence: seq)
             let sendTime = mach_absolute_time()
 
-            lock.lock()
-            sendTimes[seq] = sendTime
-            lock.unlock()
+            state.lock.lock()
+            state.sendTimes[seq] = sendTime
+            state.lock.unlock()
 
             _ = packet.withUnsafeBytes { rawBuf in
                 withUnsafeMutablePointer(to: &destAddr) { addrPtr in
@@ -182,18 +184,18 @@ final class ICMPEngine: @unchecked Sendable {
             if hop < maxHops { usleep(10_000) } // 10ms between sends
         }
 
-        lock.lock()
-        sendingDone = true
-        lock.unlock()
+        state.lock.lock()
+        state.sendingDone = true
+        state.lock.unlock()
 
         // Wait for receiver to finish (bounded by timeout deadline)
         recvGroup.wait()
 
         // Build results
-        lock.lock()
-        let finalDestHop = destHop
-        let finalResponses = responses
-        lock.unlock()
+        state.lock.lock()
+        let finalDestHop = state.destHop
+        let finalResponses = state.responses
+        state.lock.unlock()
 
         return (1...finalDestHop).map { hop in
             if let resp = finalResponses[hop] {
@@ -236,6 +238,34 @@ final class ICMPEngine: @unchecked Sendable {
         packet[3] = UInt8(cksum & 0xFF)
 
         return packet
+    }
+
+    // MARK: - Packet Parsing
+
+    /// Parse an ICMP response buffer (with IP header already stripped).
+    /// Returns nil for unrecognised types, too-short buffers, or identifier mismatch.
+    static func parseResponse(_ buf: [UInt8], count: Int, identifier: UInt16) -> ParsedICMPResponse? {
+        guard count >= 8 else { return nil }
+        let icmpType = buf[0]
+        let icmpCode = buf[1]
+
+        if icmpType == 0 { // Echo Reply
+            let seq = UInt16(buf[6]) << 8 | UInt16(buf[7])
+            return ParsedICMPResponse(seq: seq, icmpType: icmpType, icmpCode: icmpCode)
+        } else if icmpType == 11 || icmpType == 3 { // Time Exceeded / Dest Unreachable
+            let innerIPOffset = 8
+            guard count >= innerIPOffset + 20 else { return nil }
+            let ihl = Int(buf[innerIPOffset] & 0x0F) * 4
+            let innerICMPOff = innerIPOffset + ihl
+            guard count >= innerICMPOff + 8 else { return nil }
+            // Validate identifier in inner ICMP header to reject unrelated traffic
+            let innerID = UInt16(buf[innerICMPOff + 4]) << 8 | UInt16(buf[innerICMPOff + 5])
+            guard innerID == identifier else { return nil }
+            let seq = UInt16(buf[innerICMPOff + 6]) << 8 | UInt16(buf[innerICMPOff + 7])
+            return ParsedICMPResponse(seq: seq, icmpType: icmpType, icmpCode: icmpCode)
+        }
+
+        return nil
     }
 
     // MARK: - Utilities
